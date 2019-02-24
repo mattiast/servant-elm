@@ -201,11 +201,12 @@ generateElmForRequest opts request =
 mkTypeSignature :: ElmOptions -> F.Req ElmDatatype -> Doc
 mkTypeSignature opts request =
   (hsep . punctuate " ->" . concat)
-    [ catMaybes [urlPrefixType]
+    [ catMaybes [continuationType, urlPrefixType]
     , headerTypes
     , urlCaptureTypes
     , queryTypes
-    , catMaybes [bodyType, returnType]
+    , catMaybes [bodyType]
+    , [returnType]
     ]
   where
     urlPrefixType :: Maybe Doc
@@ -242,10 +243,13 @@ mkTypeSignature opts request =
     bodyType =
         fmap elmTypeRef $ request ^. F.reqBody
 
-    returnType :: Maybe Doc
-    returnType = do
+    returnType :: Doc
+    returnType = "Cmd" <+> "msg"
+
+    continuationType :: Maybe Doc
+    continuationType = do
       result <- fmap elmTypeRef $ request ^. F.reqReturnType
-      pure ("Http.Request" <+> parens result)
+      pure (parens ("Result" <+> "Http.Error" <+> parens result <+> "->" <+> "msg"))
 
 
 elmHeaderArg :: F.HeaderArg ElmDatatype -> Doc
@@ -285,7 +289,8 @@ mkArgs
   -> Doc
 mkArgs opts request =
   (hsep . concat) $
-    [ -- Dynamic url prefix
+    [ ["cont"]
+    , -- Dynamic url prefix
       case urlPrefix opts of
         Dynamic -> ["urlBase"]
         Static _ -> []
@@ -370,8 +375,8 @@ mkRequest opts request =
          indent i expect
        , "timeout =" <$>
          indent i "Nothing"
-       , "withCredentials =" <$>
-         indent i "False"
+       , "tracker =" <$>
+         indent i "Nothing"
        ])
   where
     method =
@@ -414,23 +419,27 @@ mkRequest opts request =
     expect =
       case request ^. F.reqReturnType of
         Just elmTypeExpr | isEmptyType opts elmTypeExpr ->
-          let elmConstructor =
-                Elm.toElmTypeRefWith (elmExportOptions opts) elmTypeExpr
-          in
-            "Http.expectStringResponse" <$>
-            indent i (parens (backslash <> "res" <+> "->" <$>
-                              indent i ("if String.isEmpty res.body then" <$>
-                                        indent i "Ok" <+> stext elmConstructor <$>
-                                        "else" <$>
-                                        indent i ("Err" <+> dquotes "Expected the response body to be empty")) <> line))
-
+          expectEmptyBody opts elmTypeExpr
 
         Just elmTypeExpr ->
-          "Http.expectJson" <+> stext (Elm.toElmDecoderRefWith (elmExportOptions opts) elmTypeExpr)
+          "Http.expectJson" <+> "cont" <+> stext (Elm.toElmDecoderRefWith (elmExportOptions opts) elmTypeExpr)
 
         Nothing ->
           error "mkHttpRequest: no reqReturnType?"
 
+expectEmptyBody :: ElmOptions -> ElmDatatype -> Doc
+expectEmptyBody opts elmTypeExpr =
+  let elmConstructor =
+        Elm.toElmTypeRefWith (elmExportOptions opts) elmTypeExpr
+      oldThing =
+        indent i (parens (backslash <> "e_body" <+> "->" <$>
+                          indent i ("if String.isEmpty e_body then" <$>
+                                    indent i "Ok" <+> stext elmConstructor <$>
+                                    "else" <$>
+                                    indent i ("Err" <+> (parens ("Http.BadBody" <+> dquotes "Expected the response body to be empty")))) <> line))
+  in
+    "Http.expectString" <$>
+        indent i (parens ("cont" <+> "<<" <+> "Result.andThen" <+> oldThing))
 
 mkUrl :: ElmOptions -> [F.Segment ElmDatatype] -> Doc
 mkUrl opts segments =
